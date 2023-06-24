@@ -1,0 +1,282 @@
+---
+output:
+  md_document:
+    variant: markdown_github
+---
+
+```{r}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 6, fig.height = 5, fig.pos="H", fig.pos = 'H')
+rm(list = ls()) # Clean your environment:
+
+required_packs <- c("tidyverse", "readxl", "xgboost", "pROC", "caret", "dplyr", "ggplot2", "reshape2", "readr", "DataExplorer", "tidyr", "DiagrammeR")
+
+for (pkg in required_packs) {
+    if(!(pkg %in% installed.packages())) install.packages(pkg)
+    if(!(pkg %in% (.packages()))) library(pkg, character.only = TRUE) 
+}
+
+```
+
+
+```{r import}
+set.seed(1234)
+
+data <- read_delim("./data/merger_database.csv", delim = ";")
+
+# Use the duplicated() function to identify duplicate rows
+duplicate_rows <- duplicated(data)
+
+# Subset the dataset to keep only unique rows
+data <- data[!duplicate_rows, ]
+```
+
+
+## Exploratory Data Analysis
+```{r}
+introduce(data)
+
+plot_intro(data)
+
+plot_missing(data)
+
+```
+In the figure above, we notice that there are no rows in this dataset that are completely full. Furthermore, 33.8% of the data in this dataframe are missing. 
+
+Looking at the plot of missing variables, there are some for which the NA's are explainable. 
+
+Many null entries are a result of the Commission simply not addressing those questions for an entry as the category was not relevant to the merger decision. Thus, if the questions had been asked, the answers to the questions would have been 'no'. As such, it is necessary to convert some NAs into 0s for the purpose of this analysis. 
+
+In order to collapse the data, the 'Product_Market' variable must be dropped. There are too many categories within the variable to viably classify and keeping this variable in results in duplicates of entries. 
+
+```{r}
+data <- drop_columns(data, "Product_Market")
+
+# Use the duplicated() function to identify duplicate rows
+duplicate_rows <- duplicated(data)
+
+# Subset the dataset to keep only unique rows
+data <- data[!duplicate_rows, ]
+```
+
+#Feature Engineering
+
+```{r featureengineering}
+
+
+ data <- data %>%
+        mutate(Approval_Status = if_else(Approval_Status == "Approved", 1, 0)) %>%
+        mutate(Size = case_when(
+            Size == "S" ~ 1,
+            Size == "I" ~ 2,
+            Size == "L" ~ 3,
+            TRUE ~ NA_integer_
+        )) %>%
+
+        mutate(Joint_Venture = if_else(is.na(Joint_Venture), 0, if_else(Joint_Venture == "Yes", 1, 0))) %>%
+
+        mutate(Joint_Control = if_else(is.na(Joint_Control), 0, if_else(Joint_Control == "Yes", 1, 0))) %>%
+
+        mutate(Barriers_Assess = if_else(is.na(Barriers_Assess), 0, if_else(Barriers_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Barriers_Significant = if_else(is.na(Barriers_Significant), 0, if_else(Barriers_Significant == "Yes", 1, 0))) %>%
+
+        mutate(Entry_Assess = if_else(is.na(Entry_Assess), 0, if_else(Entry_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Expansion_Assess = if_else(is.na(Expansion_Assess), 0, if_else(Expansion_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Countervail_Assess = if_else(is.na(Countervail_Assess), 0, if_else(Countervail_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Efficiency_prov = if_else(is.na(Efficiency_prov), 0, if_else(Efficiency_prov == "Yes", 1, 0))) %>%
+
+        mutate(Counterfactual_Assess = if_else(is.na(Counterfactual_Assess), 0, if_else(Counterfactual_Assess == "Yes", 1, 0))) %>%
+
+        mutate(PublicInterest_Assess = if_else(is.na(PublicInterest_Assess), 0, if_else(PublicInterest_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Overlap_Type = case_when(
+            Overlap_Type == "Horizontal" ~ 1,
+            Overlap_Type == "Vertical" ~ 2,
+            Overlap_Type == "Horizontal and vertical" ~ 3,
+            Overlap_Type == "None" ~ 4,
+            TRUE ~ 0
+        )) %>%
+
+        mutate(Countervail_Finding = if_else(Countervail_Finding %in% c("Yes", "No"), if_else(Countervail_Finding == "Yes", 1, 0), 0)) %>%
+
+        mutate(Efficiency_substantive = if_else(Efficiency_substantive %in% c("Yes", "No"), if_else(Efficiency_substantive == "Yes", 1, 0), 0)) %>%
+    
+        mutate(Import_Comp = if_else(Import_Comp %in% c("Yes", "No"), if_else(Import_Comp == "Yes", 1, 0), 0)) %>%
+    
+        mutate(Import_Constraint = if_else(Import_Constraint %in% c("Yes", "No"), if_else(Import_Constraint == "Yes", 1, 0), 0)) %>%
+
+        mutate(Conditions = case_when(
+            Conditions %in% c("public interest", "Public Interest") ~ 1,
+            Conditions %in% c("competition", "Competition") ~ 2,
+            Conditions %in% c("both", "Both") ~ 3,
+            is.na(Conditions) ~ 0,
+            TRUE ~ NA_integer_
+        )) 
+
+group_category(data = data, feature = "Sector", threshold = 0.45, update = TRUE) 
+
+group_category(data = data, feature = "Geographic_Market", threshold = 0.4, update = TRUE) 
+
+group_category(data = data, feature = "TOH_Assess", threshold = 0.2, update = TRUE)
+
+
+```
+
+Upon dealing with the NAs for which there is a logical explanation, the remaining variables with high proportions of missing values must be dealt with. Most values in this data set are a result of 'if' statements, meaning that if the answer to the previous question is a no, the entries for these columns are left blank. For the purpose of applying the XGBoost algorithm to this data set to explore outcomes, all variables must be numeric and form a matrix. Thus, the new data frame will only house variables that can be collapsed into a matrix format. 
+
+```{r newdata}
+
+data <- set_missing(data, list(0L, "unknown"))
+
+merger_df <- data %>%
+  select(Approval_Status, Size, Joint_Venture, Joint_Control, Overlap_Type,
+         Barriers_Assess, Barriers_Significant,
+         Entry_Assess, Expansion_Assess, Countervail_Assess, Countervail_Finding,
+         Efficiency_prov, Efficiency_substantive, Counterfactual_Assess,
+         PublicInterest_Assess, Year, Phase, Import_Comp, Import_Constraint, CaseNumber)
+
+# Use the duplicated() function to identify duplicate rows
+duplicate_rows <- duplicated(merger_df)
+
+# Subset the dataset to keep only unique rows
+merger_df <- merger_df[!duplicate_rows, ]
+
+```
+
+```{r heatmap}
+plot_correlation(na.omit(merger_df), type = "c") #specifying that we are only observing correlation between continuous features (there are only continuous features in this model)
+```
+'Phase' is negatively correlated to 'Approval_Status', while 'Phase' and 'Barriers_Assess' have a relatively strong positive correlation. 'Countervail_Assess' and 'Barriers_Assess' have the strongest positive correlation aside from 'Countervail_Assess' and 'Countervail_Finding'. 
+
+
+## Prepare Data for XGBoost
+```{r prep}
+target <- merger_df[["Approval_Status"]] #separating of the results column
+merger_df <- select(merger_df, -one_of("CaseNumber", "Approval_Status")) #keeping only valid explanatory variables
+```
+
+##ML framework set-up
+```{r setup}
+split_rows <- sample(c(rep(1, 711), rep(2, 2844))) #80:20 split
+
+merger_train <- merger_df[which(split_rows==1), ]
+merger_test <- merger_df[which(split_rows==2), ]
+
+approval_train <- target[which(split_rows==1)]
+approval_test <- target[which(split_rows==2)]
+```
+
+#splitting the existing training set into parameter training and hyperparameter validation
+
+```{r}
+split_rows <- sample(c(rep(1, 142), rep(2, 569))) #80:20 split
+
+m_train_param <- merger_train[which(split_rows==1),]
+m_train_val <- merger_train[which(split_rows==2),]
+
+approval_train_param <- approval_train[which(split_rows==1)]
+approval_train_val <- approval_train[which(split_rows==2)]
+```
+
+## Benchmark Model Fitting
+```{r benchmodel}
+lgt_model <- glm(target ~ . - target, data=cbind(merger_train, list(target=approval_train)), family="binomial")
+
+lgt_preds <- predict(lgt_model, newdata=merger_test, type="response") 
+
+table(lgt_preds >= 0.5, approval_test == 1) # confusion matrix
+
+print(paste("Logistic regression score:", auc(approval_test, lgt_preds))) ##0.8057 (80.57%)
+```
+
+
+## XGBoost Model Fitting
+```{r}
+xgb_model_approval <- xgboost(data=as.matrix(merger_train), label=approval_train, nrounds=100, early_stopping_rounds=10,
+                             objective="binary:logistic", eval_metric="auc",
+                             verbose=0)
+#determine model score
+xgb_preds_approval <- predict(xgb_model_approval, newdata=as.matrix(merger_test)) 
+
+table(xgb_preds_approval >= 0.5, approval_test == 1)
+```
+
+```{r}
+print(paste("Raw XGBoost score:", auc(approval_test, xgb_preds_approval))) # 79.81%... worse than raw logistic regression
+```
+
+```{r importancematrix1}
+
+
+importance_matrix <- xgb.importance(model = xgb_model_approval)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix,
+                    col = c("coral", "lightgray"))
+
+```
+
+```{r decisiontree1}
+xgb.plot.tree(model = xgb_model_approval, trees = 1)
+```
+
+
+## Hyperparameter Tuning
+```{r hyperparamtuning}
+param_options <- list(eta=c(0.005, 0.01, 0.05, 0.1, 0.2, 0.3, 0.5),
+                      max_depth=1:10)
+param_sets <- cross_df(param_options)
+
+xgb_scores <- pmap(param_sets, function(eta, max_depth) {# test each combination in turn
+    xgb_model <- xgboost(param=list(eta=eta, max_depth = max_depth),
+                         data=as.matrix(m_train_param), label=approval_train_param, nrounds = 100, early_stopping_rounds = 10, objective="binary:logistic", eval_metric="auc", verbose=0)
+    xgb_preds <- predict(xgb_model, newdata = as.matrix(m_train_val))
+    return( as.numeric(auc(approval_train_val, xgb_preds)) )
+    })
+```
+```{r results}
+filled.contour(x=param_options$eta, y = param_options$max_depth, z = matrix(xgb_scores, nrow = length(param_options$eta)))
+
+```
+
+```{r}
+best_params <- as.list(param_sets[match(max(as.numeric(xgb_scores)), xgb_scores),])
+print(paste("Best eta:", best_params$eta))
+print(paste("Best max_depth:", best_params$max_depth))
+print(paste("Best score:", max(as.numeric(xgb_scores))))
+
+```
+The best hyperparameter pair appears to be eta = 0.005, max_depth = 3, and the resulting AUC value is 0.82588 (82,59%) on the validation dataset
+
+## Retrain with hyperparameters
+```{r retrain}
+
+xgb_model_tuned <- xgboost(param=list(eta=best_params$eta, max_depth=best_params$max_depth),
+                     data=as.matrix(merger_train), label=approval_train,
+                     nrounds=100, early_stopping_rounds=10,
+                     objective="binary:logistic", eval_metric="auc",
+                     verbose=0)
+
+xgb_preds_tuned <- predict(xgb_model_tuned, newdata=as.matrix(merger_test))
+table(xgb_preds_tuned >= 0.5, approval_test == 1)
+
+print(paste("Tuned XGBoost score:", auc(approval_test, xgb_preds_tuned))) #0.8407 or 84.07% accuracy. This is a large improvement over the untuned score.
+```
+
+```{r importancematrix2}
+
+importance_matrix <- xgb.importance(model = xgb_model_tuned)
+print(importance_matrix)
+xgb.plot.importance(importance_matrix = importance_matrix,
+                    col = c("coral", "lightgray"))
+
+```
+
+```{r decisiontree2}
+
+xgb.plot.tree(model = xgb_model_tuned, trees = 1)
+
+```
+

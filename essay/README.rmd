@@ -1,0 +1,233 @@
+---
+output:
+  md_document:
+    variant: markdown_github
+---
+
+```{r}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width = 6, fig.height = 5, fig.pos="H", fig.pos = 'H')
+rm(list = ls()) # Clean your environment:
+
+required_packs <- c("tidyverse", "readxl", "xgboost", "pROC", "caret", "dplyr", "ggplot2", "reshape2", "readr")
+
+for (pkg in required_packs) {
+    if(!(pkg %in% installed.packages())) install.packages(pkg)
+    if(!(pkg %in% (.packages()))) library(pkg, character.only = TRUE) 
+}
+
+
+
+list.files('./code/', full.names = T, recursive = T) %>% as.list() %>% walk(~source(.))
+```
+
+
+## Prep
+```{r dataimport}
+
+data <- read_delim("./data/merger_database.csv", delim = ";")
+
+# Use the duplicated() function to identify duplicate rows
+duplicate_rows <- duplicated(data)
+
+# Subset the dataset to keep only unique rows
+data <- data[!duplicate_rows, ]
+
+
+# Check for NA values
+na_values <- sum(is.na(data))
+
+# Print the number of NA values
+print(na_values)
+
+```
+```{r exploratoryanalysis}
+
+g <- distdecision(data)
+
+print (g)
+
+```
+
+
+
+```{r featureengineering}
+#recoding data and generating new dataset
+
+    data <- data %>%
+        mutate(Approval_Status = if_else(Approval_Status == "Approved", 1, 0)) %>%
+        mutate(Size = case_when(
+            Size == "S" ~ 1,
+            Size == "I" ~ 2,
+            Size == "L" ~ 3,
+            TRUE ~ NA_integer_
+        )) %>%
+
+        mutate(Joint_Venture = if_else(is.na(Joint_Venture), 0, if_else(Joint_Venture == "Yes", 1, 0))) %>%
+
+        mutate(Joint_Control = if_else(is.na(Joint_Control), 0, if_else(Joint_Control == "Yes", 1, 0))) %>%
+
+        mutate(Barriers_Assess = if_else(is.na(Barriers_Assess), 0, if_else(Barriers_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Barriers_Significant = if_else(is.na(Barriers_Significant), 0, if_else(Barriers_Significant == "Yes", 1, 0))) %>%
+
+        mutate(Entry_Assess = if_else(is.na(Entry_Assess), 0, if_else(Entry_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Expansion_Assess = if_else(is.na(Expansion_Assess), 0, if_else(Expansion_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Countervail_Assess = if_else(is.na(Countervail_Assess), 0, if_else(Countervail_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Efficiency_prov = if_else(is.na(Efficiency_prov), 0, if_else(Efficiency_prov == "Yes", 1, 0))) %>%
+
+        mutate(Counterfactual_Assess = if_else(is.na(Counterfactual_Assess), 0, if_else(Counterfactual_Assess == "Yes", 1, 0))) %>%
+
+        mutate(PublicInterest_Assess = if_else(is.na(PublicInterest_Assess), 0, if_else(PublicInterest_Assess == "Yes", 1, 0))) %>%
+
+        mutate(Overlap_Type = case_when(
+            Overlap_Type == "Horizontal" ~ 1,
+            Overlap_Type == "Vertical" ~ 2,
+            Overlap_Type == "Horizontal and vertical" ~ 3,
+            Overlap_Type == "None" ~ 4,
+            TRUE ~ 0
+        )) %>%
+
+        mutate(Countervail_Finding = if_else(Countervail_Finding %in% c("Yes", "No"), if_else(Countervail_Finding == "Yes", 1, 0), 0)) %>%
+
+        mutate(Efficiency_substantive = if_else(Efficiency_substantive %in% c("Yes", "No"), if_else(Efficiency_substantive == "Yes", 1, 0), 0)) %>%
+    
+        mutate(Import_Comp = if_else(Import_Comp %in% c("Yes", "No"), if_else(Import_Comp == "Yes", 1, 0), 0)) %>%
+    
+        mutate(Import_Constraint = if_else(Import_Constraint %in% c("Yes", "No"), if_else(Import_Constraint == "Yes", 1, 0), 0)) %>%
+
+        mutate(Conditions = case_when(
+            Conditions %in% c("public interest", "Public Interest") ~ 1,
+            Conditions %in% c("competition", "Competition") ~ 2,
+            Conditions %in% c("both", "Both") ~ 3,
+            is.na(Conditions) ~ 0,
+            TRUE ~ NA_integer_
+        ))
+
+# Create the merger_df dataframe with selected variables
+
+merger_df <- data %>% 
+  select(Approval_Status, Size, Joint_Venture, Joint_Control, Overlap_Type,
+         Barriers_Assess, Barriers_Significant,
+         Entry_Assess, Expansion_Assess, Countervail_Assess, Countervail_Finding,
+         Efficiency_prov, Efficiency_substantive, Counterfactual_Assess,
+         PublicInterest_Assess, Year, Phase, Import_Comp, Import_Constraint)
+
+# Print the merger_df dataframe
+summary(merger_df)
+
+```
+
+```{r exploratoryanalysis2}
+
+g <- heatmap(merger_df)
+print(g)
+
+# # Create the boxplot
+# ggplot(merger_df, aes(x = Phase, y = Approval_Status, group = Phase)) +
+#     geom_boxplot(fill = "lightblue", color = "black") +
+#     labs(x = "Phase", y = "Approval Status", title = "Boxplot of Phase by Approval Status")
+# 
+# ggplot(merger_df, aes(x = Phase, y = Approval_Status, group = Phase)) +
+#     geom_boxplot(fill = "lightblue", color = "black") +
+#     labs(x = "Phase", y = "Approval Status", title = "Boxplot of Phase by Approval Status")
+
+```
+
+
+
+## Baseline Accuracy 
+This is ZeroR baseline accuracy prediction
+```{r baselineacc}
+
+g <- baseline_acc(merger_df)
+
+print(g)
+
+```
+
+
+
+
+
+## XGBoost
+```{r prep}
+# Split your data into training and testing sets (e.g., 80% for training and 20% for testing)
+set.seed(123)
+train_indices <- sample(1:nrow(merger_df), 0.8 * nrow(merger_df))
+train_data <- merger_df[train_indices, ]
+test_data <- merger_df[-train_indices, ]
+```
+
+
+```{r xgboost}
+# Define the target variable
+target = 'Approval_Status'
+
+class(train_data[[target]])
+
+#generating output vector
+output_vector = merger_df[, target] == 1
+
+
+# Create the XGBoost matrix (DMatrix) for training and testing
+dtrain <- xgb.DMatrix(data = as.matrix(train_data[, !colnames(train_data) %in% target]), label = as.numeric(train_data[[target]]))
+dtest <- xgb.DMatrix(data = as.matrix(test_data[, !colnames(test_data) %in% target]), label = as.numeric(test_data[[target]]))
+
+
+# Train the XGBoost model
+model <- xgboost(data = dtrain, subsample = 0.5, nrounds = 10, objective = "binary:logistic")
+```
+
+```{r prediction}
+
+pred <- predict(model, dtest)
+
+err <- mean(as.numeric(pred > 0.5) != (test_data[[target]]))
+print(paste("test-error=", err))
+
+# Evaluate the model's performance (e.g., accuracy, confusion matrix, etc.)
+# Example: Calculate accuracy
+# actual_labels <- test_data[, target]
+# accuracy <- sum(predictions > 0.5 == actual_labels) / length(actual_labels)
+
+```
+## Benchmark model fitting (logistic regression)
+```{r benchmark}
+lgt_model <- glm(Approval_Status ~. - Approval_Status, data = train_data, family = "binomial")
+
+lgt_preds <- predict(lgt_model, newdata = test_data, type = "response")
+table(lgt_preds >= 0.5, target == 1)
+
+print(paste("Logistic regression score:", auc(target, lgt_preds)))
+```
+
+
+
+```{r visualinterp} 
+#visual interpretation of initial results
+
+g <- importance_matrix(merger_df)
+
+print(g)
+
+
+```
+Finding the variable importance in the model and subsetting the variable list:
+
+As it stands, it appears as though all the variables have at least a small effect on the outcome of Approval Status of mergers when applied to the Competition Commission's merger database. 
+
+If anything, we can attempt to remove 'Joint_Control' and 'Countervail_Assess' and see if this improves model accuracy. 
+
+- we need to run with standard hyperparameters, adjust and rerun, adjust and rerun.... 
+```{r chisquaretests}
+
+g <- chisquaretests(merger_df)
+
+print(g)
+```
+
+
+
